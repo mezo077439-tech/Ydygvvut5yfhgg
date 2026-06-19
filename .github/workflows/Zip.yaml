@@ -6,22 +6,61 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: unzip-archive
+  cancel-in-progress: true
+
 jobs:
   unzip:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure unzip is available
+        run: |
+          if ! command -v unzip &> /dev/null; then
+            sudo apt-get update -y
+            sudo apt-get install -y unzip
+          fi
+
+      - name: Verify archive exists
+        run: |
+          if [ ! -f "tobest_monorepo.zip" ]; then
+            echo "::error::tobest_monorepo.zip not found in repo root"
+            exit 1
+          fi
 
       - name: Extract ZIP
         run: |
+          rm -rf extracted
           mkdir -p extracted
-          unzip -o "tobest_monorepo.zip" -d extracted
+          unzip -q -o "tobest_monorepo.zip" -d extracted
 
-      - name: Move extracted files to root
+      - name: Flatten single top-level folder (if any)
         run: |
-          shopt -s dotglob
-          mv extracted/* .
+          shopt -s dotglob nullglob
+          items=(extracted/*)
+          if [ "${#items[@]}" -eq 1 ] && [ -d "${items[0]}" ]; then
+            echo "Flattening top-level folder: ${items[0]}"
+            mv "${items[0]}"/* extracted/
+            rmdir "${items[0]}"
+          fi
+
+      - name: Move extracted files to root (excluding .git)
+        run: |
+          shopt -s dotglob nullglob
+          for item in extracted/*; do
+            base="$(basename "$item")"
+            if [ "$base" = ".git" ]; then
+              echo "Skipping .git from archive"
+              continue
+            fi
+            rm -rf "./$base"
+            mv "$item" "./$base"
+          done
           rm -rf extracted
           rm -f tobest_monorepo.zip
 
@@ -29,6 +68,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
+          git add -A
           git commit -m "Extract ZIP archive" || echo "No changes to commit"
-          git push
+
+      - name: Push changes
+        run: |
+          branch="${GITHUB_REF#refs/heads/}"
+          git push origin HEAD:"$branch"
